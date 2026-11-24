@@ -1,0 +1,42 @@
+# `agyfast-universal` — 零依赖跨宿主 MCP 透明代理与 PR 工程边界
+
+在不改动官方 `agy-fast` 插件产物的前提下，提供一个极轻、零运行期依赖的 Stdio MCP 透明转发层与跨 Agent 契约分发器。
+
+## 1. 本地运行与环境变量开关
+
+- **作为 MCP Server 挂载**：`node proxy.mjs`
+- **体检与预算门禁**：`node proxy.mjs doctor`
+- **跨宿主一键配置 / 无痕卸载**：`node proxy.mjs init --target <claude-code|cursor|opencode|generic> [--cwd <dir>] [--uninstall]`
+- **安全可逆开关**：
+  - `AGY_FAST_STRICT=1`：一键退回严格原版透传（关闭一切边界纠偏与软错误补全）。
+  - `AGY_FAST_QUIET=1`：关闭纠偏成功时末尾的 `[agyfast-universal: ...]` 提示，仅保留错误示例。
+  - `AGY_FAST_AUTORANGE=0`：禁用 `startLine` 唯一匹配弹性放宽。
+  - `AGY_FAST_DSH_SCHEMA=1`：按 DSH `json-schema.ts` 受控子集动态裁剪 `tools/list` 中不支持的约束键（如 `minimum`/`maximum`/`minItems`/`maxItems`，并将 `anyOf` 转为 `oneOf`），避免 DSH PTC 模式将工具签名退化成 `unknown`（零工具硬编码，兼容上游后续升级）。
+  - `AGY_FAST_DEFAULT_CWD=<dir>`：当外部宿主既无 `roots/list` 也未在入参传 `cwd` 时，显式回退到指定默认工作区（不猜测默认目录，未设置时不生效）。
+  - `AGY_FAST_ANNOTATIONS=1`：按需在 `tools/list` 为已知只读/编辑/命令工具附加标准 MCP `annotations`（`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`），默认关闭以严格维持 `<=1280 B` 工具声明红线；此外默认自动将 `file://...`（含 `#L1-L2` 锚点）转为本地文件系统路径。
+
+## 2. 给上游提 PR 时的工程边界拆分（重要）
+
+本地代理可以为了外挂宿主便利多走半步，但**向 `INK-Q/agy-fast` 上游提 PR 时必须严格区分以下两部分**：
+
+### A. 适合直接提 PR 合入上游核心（0 副作用、纯正收益）
+1. **智能错误引导层（P1 + P3）**：
+   - 对未置 `isError` 的软错误文本（`ERROR:`、`## [FAIL` 等）同样附带 1 行最小合法 JSON `Example:`；
+   - `hunk` 缺 `target` 时显式提示新建请用 `create`；
+   - `hunk #2` 失配时提示多 `hunk` 对原文并行匹配（非链式）。
+2. **零 Schema 增量边界归一化**：
+   - `paths` / `lineRanges` 单字符串自动包数组；
+   - `oldText`/`newText` 别名静默映射（通过 `strict` 可关）。
+3. **`maxChars` 语义对齐与安全头尾折叠**：
+   - 将工具描述中的实际下限与校验逻辑对齐，避免模型误传 `<500` 时产生预期落差；超出上限时采用 UTF-16 代理对安全的 Head-Tail 折叠。
+4. **CI 防臃肿预算门禁**：
+   - 自动检验 `runtimeDeps === 0`、单工具 `Schema <= 1280 B`、包体积增量与冷启动上限。
+
+### B. 仅保留在本地代理层（不建议作为上游默认行为强推）
+1. **`empty-hunk -> create` 猜测建文件**：存在路径拼写失误制造幽灵文件的风险（本地代理已限制仅当父目录已存在时才允许转换；上游 PR 应坚持“报错并用一句话引导改用 `create`”）。
+2. **隐式 `autoRange` 越过用户声明的 `startLine`/`endLine`**：虽对局部唯一锚点友好，但可能违背“区间保护”预期（本地代理已对 `replaceAll: true` 严格禁放宽；上游 PR 若引入应作为显式 `autoRange?: boolean` 选项，而非默认静默放宽）。
+
+## 3. 致谢与免责声明
+
+- **上游致谢**：核心搜检、大纲、切片与原子写能力全部来自 [INK-Q/agy-fast](https://github.com/INK-Q/agy-fast)（MIT）。本仓库仅提供零修改上游产物、零运行期依赖的外围 Stdio 协议适配层；默认自动定位 `~/.gemini/config/plugins/agy-fast/dist/mcp-server.mjs`，也可通过 `AGY_FAST_UPSTREAM` 指定路径。
+- **免责声明**：本工具为个人实验与学习型工程辅助脚本，按原样（`AS-IS`）提供（MIT License），不作任何生产稳定性或跨环境兼容性保证；如有需要请备份代码或设置 `AGY_FAST_STRICT=1` 秒切回原版透传。

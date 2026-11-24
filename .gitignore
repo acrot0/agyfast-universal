@@ -1,0 +1,4 @@
+_test_tmp/
+*.log
+.DS_Store
+node_modules/

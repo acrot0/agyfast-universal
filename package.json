@@ -1,0 +1,40 @@
+{
+  "name": "agyfast-universal",
+  "version": "0.1.0",
+  "description": "Zero-dependency external stdio MCP compatibility wrapper for INK-Q/agy-fast across DSH, Claude Code, Cursor, and Codex.",
+  "type": "module",
+  "main": "./adapter.mjs",
+  "bin": {
+    "agyfast-universal": "./proxy.mjs"
+  },
+  "files": [
+    "adapter.mjs",
+    "proxy.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test.mjs",
+    "doctor": "node proxy.mjs doctor"
+  },
+  "keywords": [
+    "mcp",
+    "agy-fast",
+    "deepseek-harness",
+    "claude-code",
+    "cursor",
+    "stdio-proxy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/acrot0/agyfast-universal.git"
+  },
+  "homepage": "https://github.com/acrot0/agyfast-universal#readme",
+  "bugs": {
+    "url": "https://github.com/acrot0/agyfast-universal/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

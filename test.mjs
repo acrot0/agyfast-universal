@@ -420,10 +420,78 @@ async function main() {
   });
   assert.equal(jsonEditsRes.isError, false, `JSON-string edits + alias coercion failed: ${jsonEditsRes.text}`);
   assert.ok(fs.readFileSync(path.join(TMP, "sample.js"), "utf8").includes("json_ok"));
+
+  // 8. Upstream parity: JSON-object string `arguments` preserved under defaultCwd + Content-Length framing
+  const badStrArgRes = await largeClient.req("tools/call", {
+    name: "quick_outline",
+    arguments: "{broken_json",
+  });
+  assert.equal(badStrArgRes.error?.code, -32602, "Malformed JSON string arguments must pass through to upstream -32602");
+  const strArgCwdRes = await largeClient.req("tools/call", {
+    name: "quick_outline",
+    arguments: JSON.stringify({ cwd: TMP, paths: "sample.js" }),
+  });
+  const strArgText = (strArgCwdRes.result?.content || []).map((c) => c.text || "").join("\n");
+  assert.equal(Boolean(strArgCwdRes.result?.isError), false, `JSON-object arguments failed: ${strArgText}`);
+  assert.ok(strArgText.includes("paths->array") && strArgText.includes("sample.js"), `Expected JSON-string arguments preserved: ${strArgText}`);
   largeClient.stop();
 
+  // Content-Length framing roundtrip + AGY_FAST_DEFAULT_CWD + JSON-object arguments
+  await new Promise((resolve, reject) => {
+    const clProc = spawn("node", [PROXY], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, AGY_FAST_DEFAULT_CWD: TMP },
+    });
+    let clBuf = Buffer.alloc(0);
+    const sendCl = (obj) => {
+      const json = JSON.stringify(obj);
+      clProc.stdin.write(`Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n${json}`);
+    };
+    const timer = setTimeout(() => {
+      clProc.kill();
+      reject(new Error("Content-Length framing timed out"));
+    }, 5000);
+    clProc.stdout.on("data", (chunk) => {
+      clBuf = Buffer.concat([clBuf, chunk]);
+      while (clBuf.length > 0) {
+        const head = clBuf.subarray(0, Math.min(clBuf.length, 4096)).toString("latin1");
+        const sep = /\r?\n\r?\n/.exec(head);
+        if (!sep) break;
+        const m = /^content-length:\s*(\d+)/im.exec(head.slice(0, sep.index));
+        if (!m) break;
+        const len = Number(m[1]);
+        const start = sep.index + sep[0].length;
+        if (clBuf.length < start + len) break;
+        const msg = JSON.parse(clBuf.subarray(start, start + len).toString("utf8"));
+        clBuf = clBuf.subarray(start + len);
+        if (msg.id === 1) {
+          sendCl({ jsonrpc: "2.0", method: "notifications/initialized" });
+          sendCl({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/call",
+            params: { name: "quick_outline", arguments: JSON.stringify({ paths: "sample.js" }) },
+          });
+        } else if (msg.id === 2) {
+          clearTimeout(timer);
+          clProc.kill();
+          const outTxt = (msg.result?.content || []).map((c) => c.text || "").join("\n");
+          assert.equal(Boolean(msg.result?.isError), false, `Content-Length + defaultCwd failed: ${outTxt}`);
+          assert.ok(outTxt.includes("sample.js") && outTxt.includes("defaultCwd") && outTxt.includes("paths->array"), outTxt);
+          resolve();
+        }
+      }
+    });
+    sendCl({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cl-test", version: "1.0" } },
+    });
+  });
+
   fs.rmSync(TMP, { recursive: true, force: true });
-  console.log("ALL PROXY + STRICT + DSH SCHEMA + URI/ANNOTATIONS + INSTRUMENTATION + WIN32_N1 + 20KB + INIT TESTS PASSED");
+  console.log("ALL PROXY + STRICT + DSH SCHEMA + URI/ANNOTATIONS + INSTRUMENTATION + WIN32_N1 + 20KB + FRAMING + INIT TESTS PASSED");
 }
 
 main().catch((e) => {

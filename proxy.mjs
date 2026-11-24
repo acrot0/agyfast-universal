@@ -176,12 +176,20 @@ async function runDoctor() {
 }
 
 /**
- * Backpressure-aware newline-delimited JSON-RPC pipe helper.
- * Pauses sourceReadable whenever destWritable.write() returns false until 'drain' fires.
+ * Dual-mode MCP Stdio forwarder supporting both NDJSON (\n) and Content-Length framing,
+ * with backpressure pausing on slow consumers.
  */
-function attachFramedForwarder(sourceReadable, destWritable, transformLine) {
-  const dec = new StringDecoder("utf8");
-  let buf = "";
+function writeFramed(destWritable, text, useContentLength) {
+  if (!destWritable || destWritable.destroyed || !destWritable.writable) return true;
+  if (useContentLength) {
+    const bytes = Buffer.byteLength(text, "utf8");
+    return destWritable.write(`Content-Length: ${bytes}\r\n\r\n${text}`);
+  }
+  return destWritable.write(text + "\n");
+}
+
+function attachFramedForwarder(sourceReadable, destWritable, transformFrame) {
+  let buffer = Buffer.alloc(0);
   let paused = false;
 
   const onDrain = () => {
@@ -192,40 +200,87 @@ function attachFramedForwarder(sourceReadable, destWritable, transformLine) {
   };
   destWritable.on("drain", onDrain);
 
-  const writeLine = (lineStr) => {
+  const emitText = (text, useContentLength) => {
     try {
-      if (!destWritable.destroyed && destWritable.writable) {
-        const ok = destWritable.write(lineStr + "\n");
-        if (!ok && !paused) {
-          paused = true;
-          sourceReadable.pause();
-        }
+      const ok = writeFramed(destWritable, text, useContentLength);
+      if (!ok && !paused) {
+        paused = true;
+        sourceReadable.pause();
       }
     } catch {
       // ignore EPIPE during teardown
     }
   };
 
-  const flushLines = (finalFlush = false) => {
-    if (finalFlush) buf += dec.end();
-    const lines = buf.split("\n");
-    buf = finalFlush ? "" : lines.pop() || "";
-    for (const raw of lines) {
-      const line = raw.replace(/\r$/, "");
+  const drainBuffer = (finalFlush = false) => {
+    while (buffer.length > 0) {
+      let offset = 0;
+      while (offset < buffer.length && (buffer[offset] === 10 || buffer[offset] === 13)) {
+        offset++;
+      }
+      if (offset > 0) {
+        buffer = buffer.subarray(offset);
+        if (buffer.length === 0) break;
+      }
+
+      const probe = buffer.subarray(0, Math.min(buffer.length, 16)).toString("latin1").toLowerCase();
+      if (probe.startsWith("content-length:") || probe.startsWith("content-type:")) {
+        const headerScan = buffer.subarray(0, Math.min(buffer.length, 16384)).toString("latin1");
+        const sepMatch = /\r?\n\r?\n/.exec(headerScan);
+        if (!sepMatch) break;
+        const headerText = headerScan.slice(0, sepMatch.index);
+        const clMatch = /^content-length:[ \t]*(\d+)[ \t]*\r?$/im.exec(headerText);
+        if (!clMatch) {
+          // Unknown/invalid header framing: pass through up to separator so upstream handles error
+          const rawHeader = buffer.subarray(0, sepMatch.index + sepMatch[0].length).toString("utf8");
+          buffer = buffer.subarray(sepMatch.index + sepMatch[0].length);
+          emitText(rawHeader, false);
+          continue;
+        }
+        const bodyLen = Number.parseInt(clMatch[1], 10);
+        const bodyStart = Buffer.byteLength(headerText, "latin1") + sepMatch[0].length;
+        if (!Number.isFinite(bodyLen) || bodyLen < 0 || buffer.length < bodyStart + bodyLen) {
+          break;
+        }
+        const bodyText = buffer.subarray(bodyStart, bodyStart + bodyLen).toString("utf8");
+        buffer = buffer.subarray(bodyStart + bodyLen);
+        if (!bodyText.trim()) continue;
+        const out = transformFrame(bodyText, true);
+        if (out !== null && out !== undefined) {
+          emitText(out, true);
+        }
+        continue;
+      }
+
+      const nlIdx = buffer.indexOf(10);
+      if (nlIdx === -1) {
+        if (finalFlush) {
+          const tail = buffer.toString("utf8").replace(/\r$/, "");
+          buffer = Buffer.alloc(0);
+          if (tail.trim()) {
+            const out = transformFrame(tail, false);
+            if (out !== null && out !== undefined) emitText(out, false);
+          }
+        }
+        break;
+      }
+      const line = buffer.subarray(0, nlIdx).toString("utf8").replace(/\r$/, "");
+      buffer = buffer.subarray(nlIdx + 1);
       if (!line.trim()) continue;
-      const out = transformLine(line);
+      const out = transformFrame(line, false);
       if (out !== null && out !== undefined) {
-        writeLine(out);
+        emitText(out, false);
       }
     }
   };
 
   sourceReadable.on("data", (chunk) => {
-    buf += dec.write(chunk);
-    flushLines(false);
+    const bufChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    buffer = buffer.length === 0 ? bufChunk : Buffer.concat([buffer, bufChunk]);
+    drainBuffer(false);
   });
 
-  return () => flushLines(true);
+  return () => drainBuffer(true);
 }
 
 function startStdioProxy() {
@@ -367,7 +422,7 @@ function startStdioProxy() {
     }
   });
 
-  const flushIn = attachFramedForwarder(process.stdin, upstream.stdin, (line) => {
+  const flushIn = attachFramedForwarder(process.stdin, upstream.stdin, (line, useContentLength) => {
     try {
       const msg = JSON.parse(line);
       if (Array.isArray(msg)) {
@@ -384,14 +439,14 @@ function startStdioProxy() {
           }
         }
         if (localReplies.length > 0) {
-          process.stdout.write(JSON.stringify(localReplies) + "\n");
+          writeFramed(process.stdout, JSON.stringify(localReplies), useContentLength);
         }
         if (forwardItems.length === 0) return null;
         return changed || localReplies.length > 0 ? JSON.stringify(forwardItems) : line;
       }
       const r = transformOneInbound(msg);
       if (r.localReply) {
-        process.stdout.write(JSON.stringify(r.localReply) + "\n");
+        writeFramed(process.stdout, JSON.stringify(r.localReply), useContentLength);
         return null;
       }
       return r.mutated ? JSON.stringify(msg) : line;

@@ -259,21 +259,39 @@ function coerceObjectArrayField(container, key, noteLabel, notes) {
   }
 }
 
+function parseRawArgumentsObject(rawArgs) {
+  if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+    return { obj: structuredClone(rawArgs), fromString: false, malformed: false };
+  }
+  if (typeof rawArgs === "string" && rawArgs.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(rawArgs);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { obj: parsed, fromString: true, malformed: false };
+      }
+    } catch {
+      return { obj: null, fromString: true, malformed: true };
+    }
+    return { obj: null, fromString: true, malformed: true };
+  }
+  return { obj: {}, fromString: false, malformed: false };
+}
+
 export function coerceToolArgs(toolName, rawArgs, options = {}) {
   const strict = options.strict ?? process.env.AGY_FAST_STRICT === "1";
   const allowAutoRange = options.autoRange ?? process.env.AGY_FAST_AUTORANGE !== "0";
   const defaultCwd = options.defaultCwd ?? process.env.AGY_FAST_DEFAULT_CWD;
-  const requestedMaxChars =
-    rawArgs && typeof rawArgs === "object" && rawArgs.maxChars !== undefined
-      ? Number(rawArgs.maxChars)
-      : undefined;
 
-  if (strict) {
+  const parsedArgState = parseRawArgumentsObject(rawArgs);
+  const parsedObj = parsedArgState.obj;
+  const requestedMaxChars =
+    parsedObj && parsedObj.maxChars !== undefined ? Number(parsedObj.maxChars) : undefined;
+
+  if (strict || parsedArgState.malformed) {
     return { args: rawArgs, notes: [], requestedMaxChars };
   }
 
-  // Some strict/quirky MCP hosts pass null/undefined instead of {} when all optional fields omitted
-  const args = rawArgs && typeof rawArgs === "object" ? structuredClone(rawArgs) : {};
+  const args = parsedObj;
   const notes = [];
 
   if (args.cwd === undefined && typeof defaultCwd === "string" && defaultCwd.trim()) {

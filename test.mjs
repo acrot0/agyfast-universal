@@ -331,6 +331,18 @@ async function main() {
   });
   assert.equal(uriSlice.isError, false, `Expected file://#L1-L2 + defaultCwd to pass: ${uriSlice.text}`);
   assert.ok(uriSlice.text.includes("defaultCwd") && uriSlice.text.includes("fileUri->path"));
+
+  const mdSlice = await uriClient.call("read_slices", {
+    lineRanges: `[sample](${sampleUrl}#L1-L2)`,
+  });
+  assert.equal(mdSlice.isError, false, `Expected Markdown [label](file://#L1-L2) to pass: ${mdSlice.text}`);
+  assert.ok(mdSlice.text.includes("lineRanges->array") && mdSlice.text.includes("fileUri->path"), mdSlice.text);
+
+  const mdOutline = await uriClient.call("quick_outline", {
+    paths: `[sample](${sampleUrl}#L1-L6)`,
+  });
+  assert.equal(mdOutline.isError, false, `Expected Markdown [label](file://#L1-L6) outline to pass: ${mdOutline.text}`);
+  assert.ok(mdOutline.text.includes("paths->array") && mdOutline.text.includes("fileUri->path"), mdOutline.text);
   uriClient.stop();
 
   // 6. Instrumentation: serverInfo.agyfast fingerprint (strict-gated) + opt-in usage log

@@ -19,11 +19,24 @@ const ONE_LINE_EXAMPLES = {
   run_checks: 'Example: {"cwd":"/abs/dir","commands":[{"command":"npm test"}]}',
 };
 
+const MD_FILE_LINK_RE = /^\[[^\]]*\]\((file:\/\/[^)\s]+)\)$/i;
+
+function unwrapFileReference(val) {
+  if (typeof val !== "string") return val;
+  const trimmed = val.trim();
+  const md = MD_FILE_LINK_RE.exec(trimmed);
+  return md ? md[1] : trimmed;
+}
+
 function parseStringArray(val, splitCommasWithColon = false) {
   if (Array.isArray(val)) return val;
   if (typeof val !== "string") return val;
   const s = val.trim();
   if (!s) return [];
+  // Unwrap single Markdown [label](file:///...) before `[` JSON array check
+  if (MD_FILE_LINK_RE.test(s)) {
+    return [s];
+  }
   // Per upstream maintainer #74 feedback: NEVER coerce literal booleans/null or malformed JSON fragments
   if (/^(?:true|false|null)$/i.test(s) || s.startsWith("{")) {
     return val;
@@ -113,12 +126,12 @@ function enforceMaxChars(text, maxChars) {
 }
 
 function normalizeFileUri(val) {
-  if (typeof val !== "string" || !/^file:\/\//i.test(val.trim())) return { value: val, changed: false };
-  const trimmed = val.trim();
+  const raw = unwrapFileReference(val);
+  if (typeof raw !== "string" || !/^file:\/\//i.test(raw)) return { value: val, changed: false };
   try {
-    return { value: fileURLToPath(trimmed), changed: true };
+    return { value: fileURLToPath(raw), changed: true };
   } catch {
-    let stripped = trimmed.replace(/^file:\/\/(?:localhost)?\/?/i, "");
+    let stripped = raw.replace(/#.*$/, "").replace(/^file:\/\/(?:localhost)?\/?/i, "");
     if (!/^[A-Za-z]:[\\/]/.test(stripped) && !stripped.startsWith("/") && !stripped.startsWith("\\\\")) {
       stripped = "/" + stripped;
     }
@@ -143,21 +156,21 @@ function normalizeFileUriArray(arr, notes) {
 }
 
 function normalizeLineRangeUri(val) {
-  if (typeof val !== "string" || !/^file:\/\//i.test(val.trim())) return { value: val, changed: false };
-  const trimmed = val.trim();
-  const colonMatch = /^(file:\/\/.+?)(:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)$/i.exec(trimmed);
+  const raw = unwrapFileReference(val);
+  if (typeof raw !== "string" || !/^file:\/\//i.test(raw)) return { value: val, changed: false };
+  const colonMatch = /^(file:\/\/.+?)(:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)$/i.exec(raw);
   if (colonMatch) {
     const p = normalizeFileUri(colonMatch[1]);
     return { value: `${p.value}${colonMatch[2]}`, changed: true };
   }
-  const hashMatch = /^(file:\/\/.+?)#L(\d+)(?:-L?(\d+))?$/i.exec(trimmed);
+  const hashMatch = /^(file:\/\/.+?)#L(\d+)(?:-L?(\d+))?$/i.exec(raw);
   if (hashMatch) {
     const p = normalizeFileUri(hashMatch[1]);
     const start = hashMatch[2];
     const end = hashMatch[3] || start;
     return { value: `${p.value}:${start}-${end}`, changed: true };
   }
-  return normalizeFileUri(trimmed);
+  return normalizeFileUri(raw);
 }
 
 const WIN_PS_EXPLICIT_RE = /^\s*(?:["']?)(?:pwsh|powershell)(?:\.exe)?(?:["']?)(?:\s|$)/i;

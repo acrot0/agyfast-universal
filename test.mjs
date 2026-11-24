@@ -283,6 +283,15 @@ async function main() {
   const dshListRes = await dshClient.req("tools/list", {});
   const toolsList = dshListRes.result?.tools || [];
   assert.equal(toolsList.length, 5);
+  for (const t of toolsList) {
+    const dshBytes = Buffer.byteLength(JSON.stringify(t), "utf8");
+    assert.ok(dshBytes <= 1280, `DSH schema ${t.name} exceeded 1280B: ${dshBytes}`);
+  }
+  const dshApplyTool = toolsList.find((t) => t.name === "apply_edits");
+  assert.ok(
+    dshApplyTool?.description?.includes("input size unrestricted"),
+    "apply_edits description in DSH mode should clarify input size is unrestricted"
+  );
   const rawToolsText = JSON.stringify(toolsList);
   for (const banned of ['"minimum"', '"maximum"', '"minItems"', '"maxItems"', '"$schema"']) {
     assert.ok(!rawToolsText.includes(banned), `Sanitized tools/list must omit ${banned}`);
@@ -353,8 +362,52 @@ async function main() {
   assert.equal(usageLines[0].isError, false);
   assert.equal(usageLines[1].isError, true);
 
+  // 7. >20KB single create call + Windows semicolon N1 fix (run_checks & apply_edits.verify) + UTF-8 output
+  const { coerceWindowsCommandSemicolons } = await import("./adapter.mjs");
+  assert.equal(
+    coerceWindowsCommandSemicolons("python a.py; python b.py;", "win32").value,
+    "python a.py && python b.py"
+  );
+  assert.equal(
+    coerceWindowsCommandSemicolons('python -c "import a; print(1)"', "win32").changed,
+    false
+  );
+  assert.equal(
+    coerceWindowsCommandSemicolons("$x = 1; Write-Host $x", "win32").changed,
+    false
+  );
+
+  const largeClient = new ProxyMcpTestClient({});
+  await largeClient.init();
+  const largeHtml = "<!doctype html>\n<html><body>\n" + "<p>Hello Oil Paper Umbrella</p>\n".repeat(700) + "</body></html>\n";
+  assert.ok(Buffer.byteLength(largeHtml, "utf8") > 20000, "Test fixture must exceed 20KB");
+  const singleWriteLarge = await largeClient.call("apply_edits", {
+    cwd: TMP,
+    edits: [{ path: "large_page.html", create: largeHtml, overwrite: true }],
+    verify: 'node -e "console.log(\'V1;ok\')"; node -e "console.log(\'V2_PASS\')"',
+  });
+  assert.equal(singleWriteLarge.isError, false, `Single >20KB create + verify failed: ${singleWriteLarge.text}`);
+  assert.equal(fs.readFileSync(path.join(TMP, "large_page.html"), "utf8").length, largeHtml.length);
+  if (process.platform === "win32") {
+    assert.ok(singleWriteLarge.text.includes("win32 ';'=>'&&'"), "Expected win32 semicolon note on verify");
+  }
+
+  const multiCmdCheck = await largeClient.call("run_checks", {
+    cwd: TMP,
+    outputMode: "full",
+    commands: [
+      'node -e "console.log(\'INNER;KEPT\')"; node -e "console.log(\'UTF8:\\u2212\');"',
+    ],
+  });
+  assert.equal(multiCmdCheck.isError, false, `run_checks semicolon failed: ${multiCmdCheck.text}`);
+  assert.ok(
+    multiCmdCheck.text.includes("INNER;KEPT") && multiCmdCheck.text.includes("UTF8:\u2212"),
+    `Expected both commands & UTF-8 minus in output: ${multiCmdCheck.text}`
+  );
+  largeClient.stop();
+
   fs.rmSync(TMP, { recursive: true, force: true });
-  console.log("ALL PROXY + STRICT + DSH SCHEMA + URI/ANNOTATIONS + INSTRUMENTATION + INIT TESTS PASSED");
+  console.log("ALL PROXY + STRICT + DSH SCHEMA + URI/ANNOTATIONS + INSTRUMENTATION + WIN32_N1 + 20KB + INIT TESTS PASSED");
 }
 
 main().catch((e) => {

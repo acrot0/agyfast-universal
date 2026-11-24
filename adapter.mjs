@@ -160,6 +160,67 @@ function normalizeLineRangeUri(val) {
   return normalizeFileUri(trimmed);
 }
 
+const WIN_PS_EXPLICIT_RE = /^\s*(?:["']?)(?:pwsh|powershell)(?:\.exe)?(?:["']?)(?:\s|$)/i;
+const WIN_PS_SYNTAX_RE =
+  /(?<![\\`])(?:\$env:[A-Za-z_][A-Za-z0-9_]*|\$(?:LASTEXITCODE|PSVersionTable|PSScriptRoot|PROFILE|HOME|PWD|null|true|false|_)\b|\$\([^)]|@\()|(?:^|[;|&({\r\n]\s*)(?:Get|Set|New|Remove|Test|Select|Where|ForEach|Sort|Group|Measure|Compare|ConvertTo|ConvertFrom|Export|Import|Invoke|Start|Stop|Restart|Wait|Read|Write|Out|Format|Resolve|Join|Split|Copy|Move|Rename|Clear|Add|Push|Pop|Enable|Disable)-[A-Z][A-Za-z0-9]*\b(?!-)|(?:^|[;\r\n])\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/im;
+
+/**
+ * Fix upstream N1 on win32: non-PS commands spawn cmd.exe where `;` is literal rather than a separator
+ * (so `a.py; b.py` breaks as `a.py;`). Rewrite top-level unquoted `;` cleanly to `&&`, leaving quotes untouched.
+ */
+export function coerceWindowsCommandSemicolons(command, platform = process.platform) {
+  if (platform !== "win32" || typeof command !== "string" || !command.includes(";")) {
+    return { value: command, changed: false };
+  }
+  if (WIN_PS_EXPLICIT_RE.test(command) || WIN_PS_SYNTAX_RE.test(command)) {
+    return { value: command, changed: false };
+  }
+  let out = "";
+  let quote = null;
+  let changed = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if ((ch === "\\" || (quote === '"' && ch === "`")) && i + 1 < command.length) {
+        out += ch + command[i + 1];
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      out += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === ";") {
+      changed = true;
+      let j = i + 1;
+      while (j < command.length && (command[j] === " " || command[j] === "\t" || command[j] === ";")) {
+        j++;
+      }
+      out = out.replace(/[ \t]+$/, "");
+      const next = command[j];
+      if (j >= command.length || next === "\r" || next === "\n" || next === ")") {
+        i = j - 1;
+        continue;
+      }
+      if (/[&|]$/.test(out) || next === "&" || next === "|") {
+        if (out && !/\s$/.test(out)) out += " ";
+        i = j - 1;
+        continue;
+      }
+      out += " && ";
+      i = j - 1;
+      continue;
+    }
+    out += ch;
+  }
+  return { value: out, changed };
+}
+
 const DEFAULT_TOOL_ANNOTATIONS = {
   batch_search: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   read_slices: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -260,19 +321,52 @@ export function coerceToolArgs(toolName, rawArgs, options = {}) {
       notes.push("commands->array");
     }
     if (Array.isArray(args.commands)) {
-      let changed = false;
-      for (const c of args.commands) {
-        if (c && typeof c.cwd === "string") {
-          const r = normalizeFileUri(c.cwd);
-          if (r.changed) {
-            c.cwd = r.value;
-            changed = true;
+      let uriChanged = false;
+      let semiChanged = false;
+      for (let i = 0; i < args.commands.length; i++) {
+        const c = args.commands[i];
+        if (typeof c === "string") {
+          const semi = coerceWindowsCommandSemicolons(c);
+          if (semi.changed) {
+            args.commands[i] = semi.value;
+            semiChanged = true;
+          }
+          continue;
+        }
+        if (c && typeof c === "object") {
+          if (typeof c.cwd === "string") {
+            const r = normalizeFileUri(c.cwd);
+            if (r.changed) {
+              c.cwd = r.value;
+              uriChanged = true;
+            }
+          }
+          if (typeof c.command === "string") {
+            const semi = coerceWindowsCommandSemicolons(c.command);
+            if (semi.changed) {
+              c.command = semi.value;
+              semiChanged = true;
+            }
           }
         }
       }
-      if (changed) notes.push("fileUri->path");
+      if (uriChanged) notes.push("fileUri->path");
+      if (semiChanged) notes.push("win32 ';'=>'&&'");
     }
   } else if (toolName === "apply_edits") {
+    if (typeof args.verify === "string") {
+      const semi = coerceWindowsCommandSemicolons(args.verify);
+      if (semi.changed) {
+        args.verify = semi.value;
+        notes.push("win32 ';'=>'&&'");
+      }
+    } else if (args.verify && typeof args.verify === "object" && typeof args.verify.command === "string") {
+      const semi = coerceWindowsCommandSemicolons(args.verify.command);
+      if (semi.changed) {
+        args.verify.command = semi.value;
+        notes.push("win32 ';'=>'&&'");
+      }
+    }
     if (args.edits && !Array.isArray(args.edits) && typeof args.edits === "object") {
       args.edits = [args.edits];
       notes.push("edits->array");
@@ -554,6 +648,12 @@ export function processToolsListResult(result, options = {}) {
     const next = { ...tool };
     if (dshSchema && tool.inputSchema) {
       next.inputSchema = sanitizeJsonSchemaSubset(tool.inputSchema);
+      if (tool.name === "apply_edits" && typeof next.description === "string") {
+        next.description = next.description.replace(
+          "8800 UTF-8 bytes total.",
+          "Response <=8800B (input size unrestricted)."
+        );
+      }
     }
     if (annotations && !tool.annotations && DEFAULT_TOOL_ANNOTATIONS[tool.name]) {
       next.annotations = { ...DEFAULT_TOOL_ANNOTATIONS[tool.name] };

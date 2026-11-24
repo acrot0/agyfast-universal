@@ -15,6 +15,7 @@
   - `AGY_FAST_DEFAULT_CWD=<dir>`：当外部宿主既无 `roots/list` 也未在入参传 `cwd` 时，显式回退到指定默认工作区（不猜测默认目录，未设置时不生效）。
   - `AGY_FAST_ANNOTATIONS=1`：按需在 `tools/list` 为已知只读/编辑/命令工具附加标准 MCP `annotations`（`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`），默认关闭以严格维持 `<=1280 B` 工具声明红线；此外默认自动将 `file://...`（含 `#L1-L2` 锚点）转为本地文件系统路径。
   - `AGY_FAST_USAGE=1` / `AGY_FAST_USAGE_LOG=<路径>`：显式开启 JSONL 调用统计（记录 `{ t, tool, ms, isError, sessionPid }`；默认不写盘以免污染只读或公开仓库目录；设 `AGY_FAST_USAGE=0` 可强制关闭）；同时在非 `AGY_FAST_STRICT=1` 模式下于 `initialize.result.serverInfo.agyfast` 注入代理/适配器/上游文件版本指纹。
+  - **Windows 默认防坑（非严格模式自动启用）**：① 在 `run_checks` / `apply_edits.verify` 自动将非 PowerShell 命令外层的 `;` 归一化为 `&&`（保留引号内 `;`，避免 `cmd.exe` 将 `;` 拼进文件名引发 N1）；② 未显式指定 `PYTHONIOENCODING` 时注入 `PYTHONIOENCODING=utf-8`，避免打印 `−`（U+2212）或中文触发 Python GBK `UnicodeEncodeError`；③ `apply_edits` 的 `create`/编辑入参无 8.8 KB 上限（`8800B` 仅限制返回文本体积），在 `AGY_FAST_DSH_SCHEMA=1` 下已重写描述避免误拆写入。
 
 ## 2. 给上游提 PR 时的工程边界拆分（重要）
 

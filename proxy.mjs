@@ -234,9 +234,13 @@ function startStdioProxy() {
     process.exit(1);
   }
 
+  const childEnv =
+    process.platform === "win32" && process.env.AGY_FAST_STRICT !== "1" && !process.env.PYTHONIOENCODING
+      ? { ...process.env, PYTHONIOENCODING: "utf-8" }
+      : process.env;
   const upstream = spawn("node", [DEFAULT_UPSTREAM], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: process.env,
+    env: childEnv,
   });
 
   const pendingCalls = new Map();

@@ -1,4 +1,6 @@
 _test_tmp/
 *.log
+*.jsonl
+*.bak-*
 .DS_Store
 node_modules/

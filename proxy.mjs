@@ -21,6 +21,58 @@ const DEFAULT_UPSTREAM =
   process.env.AGY_FAST_UPSTREAM ||
   path.join(os.homedir(), ".gemini", "config", "plugins", "agy-fast", "dist", "mcp-server.mjs");
 
+// ── Instrumentation (side-path only; never alters tool results) ────────────────
+const PROXY_STARTED_AT = new Date().toISOString();
+let usageDirReady = false;
+
+function resolveUsageLogPath() {
+  if (process.env.AGY_FAST_USAGE === "0") return null;
+  const raw = process.env.AGY_FAST_USAGE_LOG;
+  if (raw && raw.trim()) {
+    const trimmed = raw.trim();
+    if (trimmed === "~" || trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+      return path.join(os.homedir(), trimmed.slice(2));
+    }
+    return path.resolve(trimmed);
+  }
+  if (process.env.AGY_FAST_USAGE === "1") {
+    return path.join(__dirname, "usage.jsonl");
+  }
+  return null;
+}
+
+function mtimeIso(target) {
+  try {
+    return new Date(fs.statSync(target).mtimeMs).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function versionFingerprint() {
+  return {
+    proxy: mtimeIso(__filename),
+    adapter: mtimeIso(path.join(__dirname, "adapter.mjs")),
+    upstream: mtimeIso(DEFAULT_UPSTREAM),
+    pid: process.pid,
+    startedAt: PROXY_STARTED_AT,
+  };
+}
+
+function appendUsage(record) {
+  try {
+    const logPath = resolveUsageLogPath();
+    if (!logPath) return;
+    if (!usageDirReady) {
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      usageDirReady = true;
+    }
+    fs.appendFileSync(logPath, JSON.stringify(record) + "\n");
+  } catch {
+    // instrumentation is a side path: never break the call
+  }
+}
+
 const MAX_PENDING_CALLS = 500;
 
 function parseCliArgs(argv) {
@@ -213,15 +265,23 @@ function startStdioProxy() {
       const toolName = msg.params.name;
       const { args, notes, requestedMaxChars, validationError } = coerceToolArgs(toolName, msg.params.arguments);
       if (validationError && hasValidRequestId(msg)) {
+        const localResult = postProcessToolResult(toolName, {
+          isError: true,
+          content: [{ type: "text", text: `Validation error: ${validationError}` }],
+        });
+        appendUsage({
+          t: new Date().toISOString(),
+          tool: toolName,
+          ms: 0,
+          isError: true,
+          sessionPid: process.pid,
+        });
         return {
           mutated: false,
           localReply: {
             jsonrpc: "2.0",
             id: msg.id,
-            result: postProcessToolResult(toolName, {
-              isError: true,
-              content: [{ type: "text", text: `Validation error: ${validationError}` }],
-            }),
+            result: localResult,
           },
         };
       }
@@ -231,7 +291,7 @@ function startStdioProxy() {
         mutated = true;
       }
       if (hasValidRequestId(msg)) {
-        trackPending(msg.id, { toolName, notes, requestedMaxChars });
+        trackPending(msg.id, { toolName, notes, requestedMaxChars, t0: Date.now() });
       }
       return { mutated };
     }
@@ -251,6 +311,13 @@ function startStdioProxy() {
   };
 
   const transformOneOutbound = (msg) => {
+    // initialize: stamp running code version into serverInfo unless strict passthrough
+    if (process.env.AGY_FAST_STRICT !== "1" && msg.result && msg.result.protocolVersion !== undefined) {
+      const info = msg.result.serverInfo && typeof msg.result.serverInfo === "object" ? msg.result.serverInfo : {};
+      info.agyfast = versionFingerprint();
+      msg.result.serverInfo = info;
+      return true;
+    }
     if (hasValidRequestId(msg) && pendingCalls.has(msg.id)) {
       const meta = pendingCalls.get(msg.id);
       pendingCalls.delete(msg.id);
@@ -260,6 +327,15 @@ function startStdioProxy() {
           return true;
         }
         msg.result = postProcessToolResult(meta.toolName, msg.result, meta);
+        if (meta.toolName) {
+          appendUsage({
+            t: new Date().toISOString(),
+            tool: meta.toolName,
+            ms: typeof meta.t0 === "number" ? Date.now() - meta.t0 : null,
+            isError: msg.result.isError === true,
+            sessionPid: process.pid,
+          });
+        }
         return true;
       }
     }

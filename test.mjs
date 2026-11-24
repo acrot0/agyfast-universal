@@ -324,8 +324,37 @@ async function main() {
   assert.ok(uriSlice.text.includes("defaultCwd") && uriSlice.text.includes("fileUri->path"));
   uriClient.stop();
 
+  // 6. Instrumentation: serverInfo.agyfast fingerprint (strict-gated) + opt-in usage log
+  const initPayload = {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "proxy-test", version: "1.0" },
+  };
+  const initMetaClient = new ProxyMcpTestClient({});
+  const initMetaRes = await initMetaClient.req("initialize", initPayload);
+  const fp = initMetaRes.result?.serverInfo?.agyfast;
+  assert.ok(fp && typeof fp.proxy === "string" && typeof fp.adapter === "string" && fp.pid, "Missing serverInfo.agyfast");
+  initMetaClient.stop();
+
+  const strictMetaClient = new ProxyMcpTestClient({ AGY_FAST_STRICT: "1" });
+  const strictMetaRes = await strictMetaClient.req("initialize", initPayload);
+  assert.equal(strictMetaRes.result?.serverInfo?.agyfast, undefined, "Strict mode must not inject serverInfo.agyfast");
+  strictMetaClient.stop();
+
+  const usageLogFile = path.join(TMP, "logs", "usage.jsonl");
+  const usageClient = new ProxyMcpTestClient({ AGY_FAST_USAGE_LOG: usageLogFile });
+  await usageClient.init();
+  await usageClient.call("quick_outline", { cwd: TMP, paths: "sample.js" });
+  await usageClient.call("quick_outline", { cwd: TMP, paths: "true" });
+  usageClient.stop();
+  const usageLines = fs.readFileSync(usageLogFile, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l));
+  assert.equal(usageLines.length, 2, "Expected 2 usage log entries");
+  assert.equal(usageLines[0].tool, "quick_outline");
+  assert.equal(usageLines[0].isError, false);
+  assert.equal(usageLines[1].isError, true);
+
   fs.rmSync(TMP, { recursive: true, force: true });
-  console.log("ALL PROXY + STRICT + DSH SCHEMA + URI/ANNOTATIONS + INIT TESTS PASSED");
+  console.log("ALL PROXY + STRICT + DSH SCHEMA + URI/ANNOTATIONS + INSTRUMENTATION + INIT TESTS PASSED");
 }
 
 main().catch((e) => {

@@ -14,6 +14,7 @@
   - `AGY_FAST_DSH_SCHEMA=1`：按 DSH `json-schema.ts` 受控子集动态裁剪 `tools/list` 中不支持的约束键（如 `minimum`/`maximum`/`minItems`/`maxItems`，并将 `anyOf` 转为 `oneOf`），避免 DSH PTC 模式将工具签名退化成 `unknown`（零工具硬编码，兼容上游后续升级）。
   - `AGY_FAST_DEFAULT_CWD=<dir>`：当外部宿主既无 `roots/list` 也未在入参传 `cwd` 时，显式回退到指定默认工作区（不猜测默认目录，未设置时不生效）。
   - `AGY_FAST_ANNOTATIONS=1`：按需在 `tools/list` 为已知只读/编辑/命令工具附加标准 MCP `annotations`（`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`），默认关闭以严格维持 `<=1280 B` 工具声明红线；此外默认自动将 `file://...`（含 `#L1-L2` 锚点）转为本地文件系统路径。
+  - `AGY_FAST_USAGE=1` / `AGY_FAST_USAGE_LOG=<路径>`：显式开启 JSONL 调用统计（记录 `{ t, tool, ms, isError, sessionPid }`；默认不写盘以免污染只读或公开仓库目录；设 `AGY_FAST_USAGE=0` 可强制关闭）；同时在非 `AGY_FAST_STRICT=1` 模式下于 `initialize.result.serverInfo.agyfast` 注入代理/适配器/上游文件版本指纹。
 
 ## 2. 给上游提 PR 时的工程边界拆分（重要）
 

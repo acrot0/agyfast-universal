@@ -161,8 +161,11 @@ function normalizeLineRangeUri(val) {
 }
 
 const WIN_PS_EXPLICIT_RE = /^\s*(?:["']?)(?:pwsh|powershell)(?:\.exe)?(?:["']?)(?:\s|$)/i;
-const WIN_PS_SYNTAX_RE =
-  /(?<![\\`])(?:\$env:[A-Za-z_][A-Za-z0-9_]*|\$(?:LASTEXITCODE|PSVersionTable|PSScriptRoot|PROFILE|HOME|PWD|null|true|false|_)\b|\$\([^)]|@\()|(?:^|[;|&({\r\n]\s*)(?:Get|Set|New|Remove|Test|Select|Where|ForEach|Sort|Group|Measure|Compare|ConvertTo|ConvertFrom|Export|Import|Invoke|Start|Stop|Restart|Wait|Read|Write|Out|Format|Resolve|Join|Split|Copy|Move|Rename|Clear|Add|Push|Pop|Enable|Disable)-[A-Z][A-Za-z0-9]*\b(?!-)|(?:^|[;\r\n])\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/im;
+const WIN_PS_DOUBLE_VAR_RE =
+  /(?<![\\`])(?:\$env:[A-Za-z_][A-Za-z0-9_]*|\$(?:LASTEXITCODE|PSVersionTable|PSScriptRoot|PROFILE)\b)/i;
+// Must stay case-sensitive on cmdlet Verb-Noun (matches upstream mcp-server.mjs:257) so lowercase CLI tokens like `test-runner; echo ok` still route to cmd.exe -> && fix.
+const WIN_PS_UNQUOTED_RE =
+  /(?<![\\`])\$(?:HOME|PWD|null|true|false|_)\b|\$\([^)]|@\(|(?:^|[;|&({\r\n]\s*)(?:Get|Set|New|Remove|Test|Select|Where|ForEach|Sort|Group|Measure|Compare|ConvertTo|ConvertFrom|Export|Import|Invoke|Start|Stop|Restart|Wait|Read|Write|Out|Format|Resolve|Join|Split|Copy|Move|Rename|Clear|Add|Push|Pop|Enable|Disable)-[A-Z][A-Za-z0-9]*\b(?!-)|(?:^|[;\r\n])\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/m;
 
 /**
  * Fix upstream N1 on win32: non-PS commands spawn cmd.exe where `;` is literal rather than a separator
@@ -172,7 +175,11 @@ export function coerceWindowsCommandSemicolons(command, platform = process.platf
   if (platform !== "win32" || typeof command !== "string" || !command.includes(";")) {
     return { value: command, changed: false };
   }
-  if (WIN_PS_EXPLICIT_RE.test(command) || WIN_PS_SYNTAX_RE.test(command)) {
+  if (
+    WIN_PS_EXPLICIT_RE.test(command) ||
+    WIN_PS_DOUBLE_VAR_RE.test(command) ||
+    WIN_PS_UNQUOTED_RE.test(command)
+  ) {
     return { value: command, changed: false };
   }
   let out = "";
@@ -229,6 +236,29 @@ const DEFAULT_TOOL_ANNOTATIONS = {
   run_checks: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 };
 
+function coerceObjectArrayField(container, key, noteLabel, notes) {
+  const val = container[key];
+  if (val && !Array.isArray(val) && typeof val === "object") {
+    container[key] = [val];
+    notes.push(noteLabel);
+    return;
+  }
+  if (typeof val === "string") {
+    const s = val.trim();
+    if (s.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed)) {
+          container[key] = parsed;
+          notes.push(noteLabel);
+        }
+      } catch {
+        // leave malformed JSON intact so upstream rejects cleanly
+      }
+    }
+  }
+}
+
 export function coerceToolArgs(toolName, rawArgs, options = {}) {
   const strict = options.strict ?? process.env.AGY_FAST_STRICT === "1";
   const allowAutoRange = options.autoRange ?? process.env.AGY_FAST_AUTORANGE !== "0";
@@ -284,6 +314,7 @@ export function coerceToolArgs(toolName, rawArgs, options = {}) {
       }
       if (changed) notes.push("fileUri->path");
     }
+    coerceObjectArrayField(args, "slices", "slices->array", notes);
     if (Array.isArray(args.slices)) {
       let changed = false;
       for (const s of args.slices) {
@@ -298,10 +329,7 @@ export function coerceToolArgs(toolName, rawArgs, options = {}) {
       if (changed) notes.push("fileUri->path");
     }
   } else if (toolName === "batch_search") {
-    if (args.queries && !Array.isArray(args.queries) && typeof args.queries === "object") {
-      args.queries = [args.queries];
-      notes.push("queries->array");
-    }
+    coerceObjectArrayField(args, "queries", "queries->array", notes);
     if (Array.isArray(args.queries)) {
       let changed = false;
       for (const q of args.queries) {
@@ -316,10 +344,7 @@ export function coerceToolArgs(toolName, rawArgs, options = {}) {
       if (changed) notes.push("fileUri->path");
     }
   } else if (toolName === "run_checks") {
-    if (args.commands && !Array.isArray(args.commands) && typeof args.commands === "object") {
-      args.commands = [args.commands];
-      notes.push("commands->array");
-    }
+    coerceObjectArrayField(args, "commands", "commands->array", notes);
     if (Array.isArray(args.commands)) {
       let uriChanged = false;
       let semiChanged = false;
@@ -360,17 +385,23 @@ export function coerceToolArgs(toolName, rawArgs, options = {}) {
         args.verify = semi.value;
         notes.push("win32 ';'=>'&&'");
       }
-    } else if (args.verify && typeof args.verify === "object" && typeof args.verify.command === "string") {
-      const semi = coerceWindowsCommandSemicolons(args.verify.command);
-      if (semi.changed) {
-        args.verify.command = semi.value;
-        notes.push("win32 ';'=>'&&'");
+    } else if (args.verify && typeof args.verify === "object") {
+      if (typeof args.verify.cwd === "string") {
+        const r = normalizeFileUri(args.verify.cwd);
+        if (r.changed) {
+          args.verify.cwd = r.value;
+          notes.push("fileUri->path");
+        }
+      }
+      if (typeof args.verify.command === "string") {
+        const semi = coerceWindowsCommandSemicolons(args.verify.command);
+        if (semi.changed) {
+          args.verify.command = semi.value;
+          notes.push("win32 ';'=>'&&'");
+        }
       }
     }
-    if (args.edits && !Array.isArray(args.edits) && typeof args.edits === "object") {
-      args.edits = [args.edits];
-      notes.push("edits->array");
-    }
+    coerceObjectArrayField(args, "edits", "edits->array", notes);
     if (Array.isArray(args.edits)) {
       const baseCwd = typeof args.cwd === "string" && args.cwd ? args.cwd : process.cwd();
       for (const edit of args.edits) {
@@ -382,10 +413,7 @@ export function coerceToolArgs(toolName, rawArgs, options = {}) {
             notes.push("fileUri->path");
           }
         }
-        if (edit.hunks && !Array.isArray(edit.hunks) && typeof edit.hunks === "object") {
-          edit.hunks = [edit.hunks];
-          notes.push("hunks->array");
-        }
+        coerceObjectArrayField(edit, "hunks", "hunks->array", notes);
         if (!Array.isArray(edit.hunks)) continue;
 
         for (const h of edit.hunks) {

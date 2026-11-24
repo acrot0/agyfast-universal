@@ -342,6 +342,15 @@ function startStdioProxy() {
         }
         return true;
       }
+      if (msg.error && meta.toolName) {
+        appendUsage({
+          t: new Date().toISOString(),
+          tool: meta.toolName,
+          ms: typeof meta.t0 === "number" ? Date.now() - meta.t0 : null,
+          isError: true,
+          sessionPid: process.pid,
+        });
+      }
     }
     return false;
   };

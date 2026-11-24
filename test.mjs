@@ -376,6 +376,14 @@ async function main() {
     coerceWindowsCommandSemicolons("$x = 1; Write-Host $x", "win32").changed,
     false
   );
+  assert.equal(
+    coerceWindowsCommandSemicolons("npx test-runner; echo ok", "win32").value,
+    "npx test-runner && echo ok"
+  );
+  assert.equal(
+    coerceWindowsCommandSemicolons("Get-Date; Write-Host ok", "win32").changed,
+    false
+  );
 
   const largeClient = new ProxyMcpTestClient({});
   await largeClient.init();
@@ -404,6 +412,14 @@ async function main() {
     multiCmdCheck.text.includes("INNER;KEPT") && multiCmdCheck.text.includes("UTF8:\u2212"),
     `Expected both commands & UTF-8 minus in output: ${multiCmdCheck.text}`
   );
+  const jsonEditsRes = await largeClient.call("apply_edits", {
+    cwd: TMP,
+    edits: JSON.stringify([
+      { path: "sample.js", hunks: [{ oldText: "export const VAL = 'new';", newText: "export const VAL = 'json_ok';" }] },
+    ]),
+  });
+  assert.equal(jsonEditsRes.isError, false, `JSON-string edits + alias coercion failed: ${jsonEditsRes.text}`);
+  assert.ok(fs.readFileSync(path.join(TMP, "sample.js"), "utf8").includes("json_ok"));
   largeClient.stop();
 
   fs.rmSync(TMP, { recursive: true, force: true });

@@ -148,6 +148,8 @@ async function runDoctor() {
   const startupMs = Number((performance.now() - t0).toFixed(1));
   child.kill();
 
+  const MAX_WRAPPER_BYTES = 51200;
+  const wrapperBytes = adapterBytes + proxyBytes;
   const maxSchema = Math.max(...tools.map((t) => Buffer.byteLength(JSON.stringify(t), "utf8")));
   const snippet = generateHostContractSnippet("generic");
   const snippetBytes = Buffer.byteLength(snippet, "utf8");
@@ -156,10 +158,11 @@ async function runDoctor() {
   console.log(
     JSON.stringify(
       {
-        ok: maxSchema <= 1280 && startupMs < 250 && !hasCurly && snippetBytes <= 1024,
+        ok: maxSchema <= 1280 && startupMs < 250 && !hasCurly && snippetBytes <= 1024 && wrapperBytes <= MAX_WRAPPER_BYTES,
         upstream: DEFAULT_UPSTREAM,
         coreBytes,
-        wrapperBytes: adapterBytes + proxyBytes,
+        wrapperBytes,
+        wrapperBudgetBytes: MAX_WRAPPER_BYTES,
         deltaPct: `${deltaPct}%`,
         startupMs,
         maxToolSchemaBytes: maxSchema,

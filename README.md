@@ -38,7 +38,19 @@
 1. **`empty-hunk -> create` 猜测建文件**：存在路径拼写失误制造幽灵文件的风险（本地代理已限制仅当父目录已存在时才允许转换；上游 PR 应坚持“报错并用一句话引导改用 `create`”）。
 2. **隐式 `autoRange` 越过用户声明的 `startLine`/`endLine`**：虽对局部唯一锚点友好，但可能违背“区间保护”预期（本地代理已对 `replaceAll: true` 严格禁放宽；上游 PR 若引入应作为显式 `autoRange?: boolean` 选项，而非默认静默放宽）。
 
-## 3. 致谢与免责声明
+## 3. 功能冻结与退场矩阵（Retirement Matrix）
+
+- **冻结原则**：不再新增参数重写或花哨包装；`node proxy.mjs doctor` 强制校验 `wrapperBytes <= 51200`（50 KB 上限），后续只随上游合入做减法。
+- **永久薄适配层（仅保留宿主特有问题）**：
+  - `AGY_FAST_DSH_SCHEMA=1`（DSH PTC 极窄 JSON Schema 子集裁剪，上游不应为此破坏标准 Schema）
+  - `AGY_FAST_DEFAULT_CWD`（无 `roots/list` 宿主的工作区兜底）
+  - `AGY_FAST_USAGE_LOG`（显式开启时的本地调用日志与版本指纹）
+- **临时垫片（上游合并对应 PR 后即刻删除）**：
+  - 入参单串/别名容错与报错 `Example:` 引导 → 待 `INK-Q/agy-fast#77` 合入后删除；
+  - Windows 非 PowerShell 命令 `;` → `&&` 归一化 → 待 `INK-Q/agy-fast#76` 或 `#82` 合入后删除；
+  - `apply_edits` 工具描述 `8800B` 语义澄清 → 待上游同步澄清“仅限返回、不限输入”后删除。
+
+## 4. 致谢与免责声明
 
 - **上游致谢**：核心搜检、大纲、切片与原子写能力全部来自 [INK-Q/agy-fast](https://github.com/INK-Q/agy-fast)（MIT）。本仓库仅提供零修改上游产物、零运行期依赖的外围 Stdio 协议适配层；默认自动定位 `~/.gemini/config/plugins/agy-fast/dist/mcp-server.mjs`，也可通过 `AGY_FAST_UPSTREAM` 指定路径。
 - **免责声明**：本工具为个人实验与学习型工程辅助脚本，按原样（`AS-IS`）提供（MIT License），不作任何生产稳定性或跨环境兼容性保证；如有需要请备份代码或设置 `AGY_FAST_STRICT=1` 秒切回原版透传。

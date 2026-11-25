@@ -343,6 +343,15 @@ async function main() {
   });
   assert.equal(mdOutline.isError, false, `Expected Markdown [label](file://#L1-L6) outline to pass: ${mdOutline.text}`);
   assert.ok(mdOutline.text.includes("paths->array") && mdOutline.text.includes("fileUri->path"), mdOutline.text);
+
+  const tmpUrl = pathToFileURL(TMP).href;
+  const mdEdit = await uriClient.call("apply_edits", {
+    cwd: `[root](${tmpUrl})`,
+    dryRun: true,
+    edits: [{ path: `[sample](${sampleUrl}#L1-L2)`, hunks: [{ target: "// line 35", replacement: "// line 35 ok" }] }],
+  });
+  assert.equal(mdEdit.isError, false, `Expected Markdown cwd + edits.path to pass: ${mdEdit.text}`);
+  assert.ok(mdEdit.text.includes("fileUri->path") && mdEdit.text.includes("sample.js"), mdEdit.text);
   uriClient.stop();
 
   // 6. Instrumentation: serverInfo.agyfast fingerprint (strict-gated) + opt-in usage log

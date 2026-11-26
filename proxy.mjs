@@ -75,11 +75,27 @@ function appendUsage(record) {
 
 const MAX_PENDING_CALLS = 500;
 
+function parseToolSet(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? new Set(parts) : null;
+}
+
 function parseCliArgs(argv) {
-  const out = { cmd: null, target: "generic", cwd: process.cwd(), uninstall: false };
+  const out = {
+    cmd: null,
+    target: "generic",
+    cwd: process.cwd(),
+    uninstall: false,
+    toolFilter: parseToolSet(process.env.AGY_FAST_TOOLS),
+    upstreamArgs: [],
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!out.cmd && !a.startsWith("-")) {
+    if (!out.cmd && !a.startsWith("-") && (a === "init" || a === "doctor")) {
       out.cmd = a;
     } else if (a === "--target" && argv[i + 1]) {
       out.target = argv[++i];
@@ -87,6 +103,14 @@ function parseCliArgs(argv) {
       out.cwd = path.resolve(argv[++i]);
     } else if (a === "--uninstall") {
       out.uninstall = true;
+    } else if (a === "--tools" && argv[i + 1]) {
+      out.toolFilter = parseToolSet(argv[++i]);
+    } else if (a.startsWith("--tools=")) {
+      out.toolFilter = parseToolSet(a.slice("--tools=".length));
+    } else if (a === "--schema-compat" && argv[i + 1]) {
+      out.upstreamArgs.push(a, argv[++i]);
+    } else if (a.startsWith("--schema-compat=")) {
+      out.upstreamArgs.push(a);
     }
   }
   return out;
@@ -286,17 +310,22 @@ function attachFramedForwarder(sourceReadable, destWritable, transformFrame) {
   return () => drainBuffer(true);
 }
 
-function startStdioProxy() {
+function startStdioProxy(cli = {}) {
   if (!fs.existsSync(DEFAULT_UPSTREAM)) {
     process.stderr.write(`[agyfast-universal] Upstream server missing: ${DEFAULT_UPSTREAM}\n`);
     process.exit(1);
   }
 
+  const toolFilter = cli.toolFilter || null;
+  const upstreamArgs = Array.isArray(cli.upstreamArgs) ? cli.upstreamArgs : [];
+  let sessionHost = process.env.AGY_FAST_HOST?.trim() || null;
+  let upstreamVersion = null;
+
   const childEnv =
     process.platform === "win32" && process.env.AGY_FAST_STRICT !== "1" && !process.env.PYTHONIOENCODING
       ? { ...process.env, PYTHONIOENCODING: "utf-8" }
       : process.env;
-  const upstream = spawn("node", [DEFAULT_UPSTREAM], {
+  const upstream = spawn("node", [DEFAULT_UPSTREAM, ...upstreamArgs], {
     stdio: ["pipe", "pipe", "pipe"],
     env: childEnv,
   });
@@ -323,8 +352,31 @@ function startStdioProxy() {
 
   const transformOneInbound = (msg) => {
     if (!msg || typeof msg !== "object") return { mutated: false };
+    if (msg.method === "initialize" && msg.params?.clientInfo?.name && !sessionHost) {
+      sessionHost = String(msg.params.clientInfo.name);
+      return { mutated: false };
+    }
     if (msg.method === "tools/call" && msg.params && typeof msg.params.name === "string") {
       const toolName = msg.params.name;
+      if (toolFilter && !toolFilter.has(toolName) && hasValidRequestId(msg)) {
+        appendUsage({
+          t: new Date().toISOString(),
+          tool: toolName,
+          ms: 0,
+          isError: true,
+          sessionPid: process.pid,
+          host: sessionHost || "unknown",
+          version: upstreamVersion || "unknown",
+        });
+        return {
+          mutated: false,
+          localReply: {
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: -32602, message: `Unknown tool: ${toolName}` },
+          },
+        };
+      }
       const { args, notes, requestedMaxChars, validationError } = coerceToolArgs(toolName, msg.params.arguments);
       if (validationError && hasValidRequestId(msg)) {
         const localResult = postProcessToolResult(toolName, {
@@ -337,6 +389,8 @@ function startStdioProxy() {
           ms: 0,
           isError: true,
           sessionPid: process.pid,
+          host: sessionHost || "unknown",
+          version: upstreamVersion || "unknown",
         });
         return {
           mutated: false,
@@ -357,13 +411,11 @@ function startStdioProxy() {
       }
       return { mutated };
     }
-    if (
-      msg.method === "tools/list" &&
+    const wantsSchemaRewrite =
       process.env.AGY_FAST_STRICT !== "1" &&
-      (process.env.AGY_FAST_DSH_SCHEMA === "1" || process.env.AGY_FAST_ANNOTATIONS === "1") &&
-      hasValidRequestId(msg)
-    ) {
-      trackPending(msg.id, { kind: "tools_list" });
+      (process.env.AGY_FAST_DSH_SCHEMA === "1" || process.env.AGY_FAST_ANNOTATIONS === "1");
+    if (msg.method === "tools/list" && (wantsSchemaRewrite || toolFilter) && hasValidRequestId(msg)) {
+      trackPending(msg.id, { kind: "tools_list", wantsSchemaRewrite });
       return { mutated: false };
     }
     if (msg.method === "notifications/cancelled" && msg.params?.requestId !== undefined) {
@@ -373,19 +425,32 @@ function startStdioProxy() {
   };
 
   const transformOneOutbound = (msg) => {
-    // initialize: stamp running code version into serverInfo unless strict passthrough
-    if (process.env.AGY_FAST_STRICT !== "1" && msg.result && msg.result.protocolVersion !== undefined) {
-      const info = msg.result.serverInfo && typeof msg.result.serverInfo === "object" ? msg.result.serverInfo : {};
-      info.agyfast = versionFingerprint();
-      msg.result.serverInfo = info;
-      return true;
+    // initialize: record upstream version and stamp running code version into serverInfo
+    if (msg.result && msg.result.protocolVersion !== undefined) {
+      if (typeof msg.result.serverInfo?.version === "string") {
+        upstreamVersion = msg.result.serverInfo.version;
+      }
+      if (process.env.AGY_FAST_STRICT !== "1") {
+        const info = msg.result.serverInfo && typeof msg.result.serverInfo === "object" ? msg.result.serverInfo : {};
+        info.agyfast = versionFingerprint();
+        msg.result.serverInfo = info;
+        return true;
+      }
+      return false;
     }
     if (hasValidRequestId(msg) && pendingCalls.has(msg.id)) {
       const meta = pendingCalls.get(msg.id);
       pendingCalls.delete(msg.id);
       if (msg.result) {
         if (meta.kind === "tools_list") {
-          msg.result = processToolsListResult(msg.result);
+          let nextResult = meta.wantsSchemaRewrite ? processToolsListResult(msg.result) : msg.result;
+          if (toolFilter && Array.isArray(nextResult?.tools)) {
+            nextResult = {
+              ...nextResult,
+              tools: nextResult.tools.filter((t) => t && toolFilter.has(t.name)),
+            };
+          }
+          msg.result = nextResult;
           return true;
         }
         msg.result = postProcessToolResult(meta.toolName, msg.result, meta);
@@ -396,6 +461,8 @@ function startStdioProxy() {
             ms: typeof meta.t0 === "number" ? Date.now() - meta.t0 : null,
             isError: msg.result.isError === true,
             sessionPid: process.pid,
+            host: sessionHost || "unknown",
+            version: upstreamVersion || "unknown",
           });
         }
         return true;
@@ -407,6 +474,8 @@ function startStdioProxy() {
           ms: typeof meta.t0 === "number" ? Date.now() - meta.t0 : null,
           isError: true,
           sessionPid: process.pid,
+          host: sessionHost || "unknown",
+          version: upstreamVersion || "unknown",
         });
       }
     }
@@ -506,5 +575,5 @@ if (cli.cmd === "init") {
     process.exit(1);
   });
 } else {
-  startStdioProxy();
+  startStdioProxy(cli);
 }

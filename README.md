@@ -14,7 +14,8 @@
   - `AGY_FAST_DSH_SCHEMA=1`：按 DSH `json-schema.ts` 受控子集动态裁剪 `tools/list` 中不支持的约束键（如 `minimum`/`maximum`/`minItems`/`maxItems`，并将 `anyOf` 转为 `oneOf`），避免 DSH PTC 模式将工具签名退化成 `unknown`（零工具硬编码，兼容上游后续升级）。
   - `AGY_FAST_DEFAULT_CWD=<dir>`：当外部宿主既无 `roots/list` 也未在入参传 `cwd` 时，显式回退到指定默认工作区（不猜测默认目录，未设置时不生效）。
   - `AGY_FAST_ANNOTATIONS=1`：按需在 `tools/list` 为已知只读/编辑/命令工具附加标准 MCP `annotations`（`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`），默认关闭以严格维持 `<=1280 B` 工具声明红线；此外默认自动将 `file://...`（含 `#L1-L2` 锚点）转为本地文件系统路径。
-  - `AGY_FAST_USAGE=1` / `AGY_FAST_USAGE_LOG=<路径>`：显式开启 JSONL 调用统计（记录 `{ t, tool, ms, isError, sessionPid }`；默认不写盘以免污染只读或公开仓库目录；设 `AGY_FAST_USAGE=0` 可强制关闭）；同时在非 `AGY_FAST_STRICT=1` 模式下于 `initialize.result.serverInfo.agyfast` 注入代理/适配器/上游文件版本指纹。
+  - `AGY_FAST_USAGE=1` / `AGY_FAST_USAGE_LOG=<路径>`：显式开启 JSONL 调用统计（记录 `{ t, tool, ms, isError, sessionPid, host, version }`；默认不写盘以免污染只读或公开仓库目录；设 `AGY_FAST_USAGE=0` 可强制关闭）；同时在非 `AGY_FAST_STRICT=1` 模式下于 `initialize.result.serverInfo.agyfast` 注入代理/适配器/上游文件版本指纹。
+  - `--tools <list>` / `AGY_FAST_TOOLS`：按逗号分隔裁剪暴露给宿主的 MCP 工具子集，对未暴露工具返回 `-32602`（同时兼容现有 `v0.3.1` 上游）。
   - **Windows 默认防坑（非严格模式自动启用）**：① 在 `run_checks` / `apply_edits.verify` 自动将非 PowerShell 命令外层的 `;` 归一化为 `&&`（保留引号内 `;`，避免 `cmd.exe` 将 `;` 拼进文件名引发 N1）；② 未显式指定 `PYTHONIOENCODING` 时注入 `PYTHONIOENCODING=utf-8`，避免打印 `−`（U+2212）或中文触发 Python GBK `UnicodeEncodeError`；③ `apply_edits` 的 `create`/编辑入参无 8.8 KB 上限（`8800B` 仅限制返回文本体积），在 `AGY_FAST_DSH_SCHEMA=1` 下已重写描述避免误拆写入。
 
 ## 2. 给上游提 PR 时的工程边界拆分（重要）
@@ -41,13 +42,15 @@
 ## 3. 功能冻结与退场矩阵（Retirement Matrix）
 
 - **冻结原则**：不再新增参数重写或花哨包装；`node proxy.mjs doctor` 强制校验 `wrapperBytes <= 51200`（50 KB 上限），后续只随上游合入做减法。
-- **永久薄适配层（仅保留宿主特有问题）**：
-  - `AGY_FAST_DSH_SCHEMA=1`（DSH PTC 极窄 JSON Schema 子集裁剪，上游不应为此破坏标准 Schema）
+- **永久薄差异层（上游明确不进核心的宿主便利/可观测性）**：
   - `AGY_FAST_DEFAULT_CWD`（无 `roots/list` 宿主的工作区兜底）
-  - `AGY_FAST_USAGE_LOG`（显式开启时的本地调用日志与版本指纹）
-- **临时垫片（上游合并对应 PR 后即刻删除）**：
-  - 入参单串/别名容错与报错 `Example:` 引导 → 待 `INK-Q/agy-fast#77` 合入后删除；
-  - Windows 非 PowerShell 命令 `;` → `&&` 归一化 → 待 `INK-Q/agy-fast#76` 或 `#82` 合入后删除；
+  - `AGY_FAST_USAGE_LOG`（显式开启时的本地调用日志，含 `host`/`version` 归因）
+  - `AGY_FAST_ANNOTATIONS=1`、`file://` URI 解包、`autoRange`、`empty-hunk -> create` 与软错误 `Example:` 引导
+- **已合入或待发版即刻退场（等 `v0.3.2` 更新到本机插件后删减）**：
+  - `AGY_FAST_DSH_SCHEMA=1`（`sanitizeJsonSchemaSubset`）→ 上游已在 `dev`（`f35ba50`）原生落地 `--schema-compat=minimal` / `AGY_FAST_SCHEMA_COMPAT=minimal`；`v0.3.2` 后改为透传官方 `--schema-compat=minimal` 并删除本地重写逻辑；
+  - `--tools` 本地代理拦截 → 上游 `INK-Q/agy-fast#64` 合入并发布 `v0.3.2` 后改为透传；
+  - 入参单串/别名容错与硬校验 `Example:` 引导 → 上游 `INK-Q/agy-fast#77` 合入并发布 `v0.3.2` 后删除；
+  - Windows 非 PowerShell 命令 `;` → `&&` 归一化 → 上游 `INK-Q/agy-fast#82` 已合入 `dev`，发布 `v0.3.2` 后评估删除；
   - `apply_edits` 工具描述 `8800B` 语义澄清 → 待上游同步澄清“仅限返回、不限输入”后删除。
 
 ## 4. 致谢与免责声明

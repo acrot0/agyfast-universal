@@ -14,9 +14,13 @@ class ProxyMcpTestClient {
     this.nextId = 0; // Explicitly start at id=0 to catch falsy id bugs
     this.pending = new Map();
     this.buf = "";
+    const baseEnv = { ...process.env };
+    for (const key of Object.keys(baseEnv)) {
+      if (key.startsWith("AGY_FAST_")) delete baseEnv[key];
+    }
     this.proc = spawn("node", [PROXY, ...extraArgs], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...extraEnv },
+      env: { ...baseEnv, ...extraEnv },
     });
     this.proc.stdout.on("data", (d) => {
       this.buf += d.toString();

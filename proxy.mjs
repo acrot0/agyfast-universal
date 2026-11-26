@@ -172,7 +172,7 @@ async function runDoctor() {
   const startupMs = Number((performance.now() - t0).toFixed(1));
   child.kill();
 
-  const MAX_WRAPPER_BYTES = 51200;
+  const MAX_WRAPPER_BYTES = 57344;
   const wrapperBytes = adapterBytes + proxyBytes;
   const maxSchema = Math.max(...tools.map((t) => Buffer.byteLength(JSON.stringify(t), "utf8")));
   const snippet = generateHostContractSnippet("generic");

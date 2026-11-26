@@ -10,11 +10,11 @@ const PROXY = path.join(__dirname, "proxy.mjs");
 const TMP = path.join(__dirname, "_test_tmp");
 
 class ProxyMcpTestClient {
-  constructor(extraEnv = {}) {
+  constructor(extraEnv = {}, extraArgs = []) {
     this.nextId = 0; // Explicitly start at id=0 to catch falsy id bugs
     this.pending = new Map();
     this.buf = "";
-    this.proc = spawn("node", [PROXY], {
+    this.proc = spawn("node", [PROXY, ...extraArgs], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...extraEnv },
     });
@@ -254,10 +254,15 @@ async function main() {
   quietClient.stop();
 
   // 2. Strict mode kill-switch (AGY_FAST_STRICT=1) behaves exactly like raw upstream
+  // (e.g. rejects proxy-only empty-hunk->create and never injects proxy tags)
   const strictClient = new ProxyMcpTestClient({ AGY_FAST_STRICT: "1" });
   await strictClient.init();
-  const strictOut = await strictClient.call("quick_outline", { cwd: TMP, paths: "sample.js" });
-  assert.equal(strictOut.isError, true, "Strict mode should reject bare string paths");
+  const strictEmptyHunk = await strictClient.call("apply_edits", {
+    cwd: TMP,
+    edits: [{ path: "strict_should_not_create.txt", hunks: [{ target: "", replacement: "nope" }] }],
+  });
+  assert.equal(strictEmptyHunk.isError, true, "Strict mode must reject empty-hunk->create");
+  assert.equal(fs.existsSync(path.join(TMP, "strict_should_not_create.txt")), false);
   strictClient.stop();
 
   // 3. CLI init & --uninstall lossless cleanup
@@ -510,6 +515,49 @@ async function main() {
       params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "cl-test", version: "1.0" } },
     });
   });
+
+  // 9. --tools filtering & AGY_FAST_USAGE_LOG host/version attribution
+  const usageLog = path.join(TMP, "usage.jsonl");
+  const scopedClient = new ProxyMcpTestClient(
+    { AGY_FAST_USAGE_LOG: usageLog },
+    ["--tools", "batch_search,quick_outline,run_checks"],
+  );
+  await scopedClient.init();
+  const scopedList = await scopedClient.req("tools/list", {});
+  const scopedNames = (scopedList.result?.tools || []).map((t) => t.name);
+  assert.deepEqual(scopedNames, ["batch_search", "quick_outline", "run_checks"]);
+  const blockedCall = await scopedClient.req("tools/call", {
+    name: "apply_edits",
+    arguments: { edits: [] },
+  });
+  assert.equal(blockedCall.error?.code, -32602);
+  const scopedCall = await scopedClient.call("quick_outline", { cwd: TMP, paths: "sample.js" });
+  assert.equal(scopedCall.isError, false);
+  scopedClient.stop();
+
+  const usageRows = fs
+    .readFileSync(usageLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.ok(usageRows.length >= 2, `Expected >=2 usage rows, got ${usageRows.length}`);
+  assert.equal(usageRows[0].host, "proxy-test");
+  assert.ok(typeof usageRows[0].version === "string" && usageRows[0].version !== "unknown");
+
+  // 10. --schema-compat=minimal forwarded natively to v0.3.2 without AGY_FAST_DSH_SCHEMA=1
+  const minCompatClient = new ProxyMcpTestClient(
+    { AGY_FAST_HOST: "dsh" },
+    ["--schema-compat=minimal"],
+  );
+  await minCompatClient.init();
+  const minCompatList = await minCompatClient.req("tools/list", {});
+  const minTools = minCompatList.result?.tools || [];
+  assert.equal(minTools.length, 5);
+  const minRaw = JSON.stringify(minTools);
+  for (const forbidden of ['"minimum"', '"maximum"', '"minItems"', '"maxItems"']) {
+    assert.equal(minRaw.includes(forbidden), false, `Native --schema-compat=minimal should strip ${forbidden}`);
+  }
+  minCompatClient.stop();
 
   fs.rmSync(TMP, { recursive: true, force: true });
   console.log("ALL PROXY + STRICT + DSH SCHEMA + URI/ANNOTATIONS + INSTRUMENTATION + WIN32_N1 + 20KB + FRAMING + INIT TESTS PASSED");
